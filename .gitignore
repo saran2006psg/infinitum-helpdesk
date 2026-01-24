@@ -138,4 +138,14 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 
-README.md
+# Python virtual environment
+venv/
+
+# Generated QR codes
+qr-codes/*.png
+
+# VSCode settings (personal preferences)
+.vscode/
+
+# Local environment variables
+.env.local

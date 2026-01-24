@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef, KeyboardEvent, ChangeEvent } from 'react';
+import { useState, useEffect, useRef, KeyboardEvent, ChangeEvent, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { QRCodeSVG } from 'qrcode.react';
 import type { ParticipantDetails } from '@/types';
@@ -24,6 +24,63 @@ export default function ProvideKit() {
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const sessionCheckIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Define startPolling as useCallback so it can be called from handlers
+  const startPolling = useCallback((sessId: string) => {
+    // Clear any existing polling first
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+    }
+
+    console.log('Starting polling for session:', sessId);
+    
+    // Poll every 2 seconds
+    pollingIntervalRef.current = setInterval(async () => {
+      try {
+        const response = await fetch(`/api/scan-session?session_id=${sessId}`);
+        const data = await response.json();
+
+        console.log('Polling response:', data);
+
+        if (data.success && data.status === 'scanned' && data.participant_id) {
+          console.log('Participant scanned:', data.participant_id);
+          
+          // Got a scan result!
+          const now = new Date();
+          
+          // First scan - phone just connected
+          if (!phoneConnected) {
+            setPhoneConnected(true);
+            setSessionDisconnected(false);
+            sessionStorage.setItem('phoneConnected', 'true');
+            setSuccess('📱 Phone connected! Ready to scan participants.');
+            setTimeout(() => setSuccess(''), 3000);
+          }
+          
+          // Update last scan time
+          setLastScanTime(now);
+          sessionStorage.setItem('lastScanTime', now.toISOString());
+          
+          const lastFour = data.participant_id.replace('INF', '');
+          const digits = lastFour.split('');
+          setOtpDigits(digits);
+          await fetchParticipantDetails(lastFour);
+          
+          // Reset session status for next scan (keep same session)
+          await fetch('/api/scan-session', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              session_id: sessId,
+              status: 'waiting'
+            })
+          });
+        }
+      } catch (err) {
+        console.error('Polling error:', err);
+      }
+    }, 2000);
+  }, [phoneConnected]);
+
   useEffect(() => {
     // Check authentication
     const token = localStorage.getItem('authToken');
@@ -31,13 +88,11 @@ export default function ProvideKit() {
       router.push('/login');
     }
 
-    // Restore scanner mode state from sessionStorage if exists
-    const savedScannerMode = sessionStorage.getItem('scannerMode');
+    // Always auto-start scanner mode
     const savedSessionId = sessionStorage.getItem('scannerSessionId');
     const savedScannerUrl = sessionStorage.getItem('scannerUrl');
 
-    if (savedScannerMode === 'true' && savedSessionId && savedScannerUrl) {
-      setScannerMode(true);
+    if (savedSessionId && savedScannerUrl) {
       setSessionId(savedSessionId);
       setScannerUrl(savedScannerUrl);
       
@@ -54,7 +109,45 @@ export default function ProvideKit() {
       // Restart polling for the existing session
       startPolling(savedSessionId);
       startSessionCheck();
+    } else {
+      // Auto-create new scanner session on load
+      createScanSession();
     }
+
+    // Handle tab visibility change - stop/start polling
+    const handleVisibilityChange = () => {
+      const sessId = sessionStorage.getItem('scannerSessionId');
+      if (!sessId) return;
+
+      if (document.hidden) {
+        // Tab is now hidden - stop polling to save resources
+        if (pollingIntervalRef.current) {
+          clearInterval(pollingIntervalRef.current);
+          pollingIntervalRef.current = null;
+        }
+        // Clear phone connected flag if tab is hidden (user likely left)
+        sessionStorage.setItem('phoneConnected', 'false');
+        setPhoneConnected(false);
+      } else {
+        // Tab is now visible - restart polling immediately
+        if (!pollingIntervalRef.current) {
+          startPolling(sessId);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    // Cleanup when page unmounts - stop polling and clear scanner state
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopPolling();
+      stopSessionCheck();
+      // Clear scanner state from sessionStorage
+      sessionStorage.removeItem('phoneConnected');
+      sessionStorage.removeItem('lastScanTime');
+      sessionStorage.removeItem('scannerMode');
+    };
   }, [router]);
 
   useEffect(() => {
@@ -122,12 +215,12 @@ export default function ProvideKit() {
         setSessionId(data.session_id);
         
         // Use environment variable or auto-detect from browser
-        const hostIP = process.env.NEXT_PUBLIC_HOST_IP;
+        const hostIP = process.env.NEXT_PUBLIC_HOST_IP || '10.155.34.158';
         const baseUrl = hostIP 
           ? `http://${hostIP}:3001` 
           : typeof window !== 'undefined' 
             ? window.location.origin 
-            : 'http://localhost:3001';
+            : 'http://10.155.34.158:3001';
         
         const url = `${baseUrl}/mobile-scanner?session=${data.session_id}`;
         setScannerUrl(url);
@@ -149,52 +242,6 @@ export default function ProvideKit() {
       setLoading(false);
     }
   };
-
-  const startPolling = (sessId: string) => {
-    // Poll every 2 seconds
-    pollingIntervalRef.current = setInterval(async () => {
-      try {
-        const response = await fetch(`/api/scan-session?session_id=${sessId}`);
-        const data = await response.json();
-
-        if (data.success && data.status === 'scanned' && data.participant_id) {
-          // Got a scan result!
-          const now = new Date();
-          
-          // First scan - phone just connected
-          if (!phoneConnected) {
-            setPhoneConnected(true);
-            setSessionDisconnected(false);
-            sessionStorage.setItem('phoneConnected', 'true');
-            setSuccess('📱 Phone connected! Ready to scan participants.');
-            setTimeout(() => setSuccess(''), 3000);
-          }
-          
-          // Update last scan time
-          setLastScanTime(now);
-          sessionStorage.setItem('lastScanTime', now.toISOString());
-          
-          const lastFour = data.participant_id.replace('INFIN', '');
-          const digits = lastFour.split('');
-          setOtpDigits(digits);
-          await fetchParticipantDetails(lastFour);
-          
-          // Reset session status for next scan (keep same session)
-          await fetch('/api/scan-session', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              session_id: sessId,
-              status: 'waiting'
-            })
-          });
-        }
-      } catch (err) {
-        console.error('Polling error:', err);
-      }
-    }, 2000);
-  };
-
   const stopPolling = () => {
     if (pollingIntervalRef.current) {
       clearInterval(pollingIntervalRef.current);
@@ -203,19 +250,19 @@ export default function ProvideKit() {
   };
 
   const startSessionCheck = () => {
-    // Check every 10 seconds if session is still active
+    // Check every 5 seconds if session is still active
     sessionCheckIntervalRef.current = setInterval(() => {
       if (lastScanTime && phoneConnected) {
         const timeSinceLastScan = Date.now() - lastScanTime.getTime();
-        // If no scan in last 2 minutes, consider phone disconnected
-        if (timeSinceLastScan > 120000) {
+        // If no scan in last 30 seconds, consider phone disconnected
+        if (timeSinceLastScan > 30000) {
           setSessionDisconnected(true);
           setPhoneConnected(false);
           sessionStorage.setItem('phoneConnected', 'false');
           setError('⚠️ Phone disconnected! Please scan the QR code again to reconnect.');
         }
       }
-    }, 10000);
+    }, 5000);
   };
 
   const stopSessionCheck = () => {
@@ -263,9 +310,9 @@ export default function ProvideKit() {
     setParticipantData(null);
 
     try {
-      const participantId = `INFIN${lastFourDigits}`;
+      // Try to construct full participant ID (INF + 4 digits)
+      const participantId = `INF${lastFourDigits}`;
       
-      // TODO: Replace with actual API endpoint
       const response = await fetch(`/api/participant/${participantId}`, {
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('authToken')}`
@@ -274,7 +321,14 @@ export default function ProvideKit() {
 
       if (response.ok) {
         const data = await response.json();
-        setParticipantData(data);
+        // Handle response format from API
+        if (data.success && data.participant) {
+          setParticipantData(data.participant);
+        } else if (data.participant) {
+          setParticipantData(data.participant);
+        }
+      } else if (response.status === 404) {
+        setError('❌ Participant Not Found! Please verify the ID.');
       } else {
         const errorData = await response.json();
         setError(errorData.message || 'Participant not found');
@@ -343,84 +397,143 @@ export default function ProvideKit() {
 
   return (
     <div className="page-container">
-      <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: '40px' }}>
+      <div className="page-header">
         <h1>Provide Kit</h1>
-        <button 
-          className="btn btn-primary" 
-          onClick={toggleScannerMode}
-          style={{ 
-            maxWidth: '250px', 
-            fontSize: '14px',
-            padding: '12px 24px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '10px'
-          }}
-        >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M3 7h3m14 0h3M3 12h18M3 17h3m14 0h3"/>
-            <rect x="7" y="5" width="10" height="14" rx="1"/>
-          </svg>
-          {scannerMode ? 'Disable Scanner Mode' : 'Enable Scanner Mode'}
-        </button>
       </div>
 
       <div className="page-content">
         {error && <div className="alert alert-error">{error}</div>}
         {success && <div className="alert alert-success">{success}</div>}
 
-        {/* Default Mode - Simple Search by ID */}
-        {!scannerMode && (
-          <section>
-            <div style={{ 
-              maxWidth: '600px', 
-              margin: '0 auto',
-              textAlign: 'center'
+        <section>
+          {/* Combined Input Methods - Single Large Box */}
+          {!participantData && (
+          <div style={{
+            background: 'linear-gradient(135deg, #667EEA 0%, #764BA2 100%)',
+            borderRadius: '32px',
+            padding: '60px',
+            marginBottom: '48px',
+            boxShadow: '0 20px 60px rgba(102, 126, 234, 0.4)',
+            minHeight: '500px',
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: '60px',
+            alignItems: 'center'
+          }}>
+            {/* Left Side - Mobile Scanner QR */}
+            <div style={{
+              textAlign: 'center',
+              color: 'white'
             }}>
-              <div style={{
-                marginBottom: '48px'
+              <h3 style={{ 
+                color: 'white', 
+                marginBottom: '32px',
+                fontSize: '28px',
+                fontWeight: '700'
               }}>
-                <div style={{
-                  width: '80px',
-                  height: '80px',
-                  margin: '0 auto 24px',
-                  background: 'linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%)',
-                  borderRadius: '50%',
+                📱 Mobile Scanner
+              </h3>
+              
+              <div style={{
+                background: 'rgba(255, 255, 255, 0.95)',
+                padding: '32px',
+                borderRadius: '20px',
+                boxShadow: '0 8px 24px rgba(0,0,0,0.2)',
+                display: 'inline-block'
+              }}>
+                <QRCodeSVG 
+                  value={scannerUrl || 'Loading...'}
+                  size={280}
+                  level="H"
+                  bgColor="#ffffff"
+                  fgColor="#000000"
+                />
+              </div>
+              <p style={{ 
+                color: 'rgba(255,255,255,0.95)', 
+                fontSize: '16px',
+                marginTop: '24px',
+                marginBottom: '16px',
+                fontWeight: '500'
+              }}>
+                Scan this QR with your phone
+              </p>
+              <div style={{
+                background: 'rgba(255, 255, 255, 0.15)',
+                padding: '16px 24px',
+                borderRadius: '12px',
+                border: '1px solid rgba(255, 255, 255, 0.3)',
+                textAlign: 'center',
+                backdropFilter: 'blur(10px)'
+              }}>
+                <p style={{ 
+                  color: 'white', 
+                  fontSize: '14px',
+                  margin: 0,
+                  fontWeight: '600',
                   display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'center'
+                  justifyContent: 'center',
+                  gap: '8px'
                 }}>
-                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2">
-                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-                    <circle cx="12" cy="7" r="4"/>
-                  </svg>
-                </div>
-                <h2 style={{ 
-                  color: 'var(--text-primary)', 
-                  marginBottom: '12px',
-                  fontSize: '28px'
-                }}>
-                  Enter a Unique ID
-                </h2>
-                <p style={{ 
-                  color: 'var(--text-secondary)', 
-                  fontSize: '16px'
-                }}>
-                  Enter the 4-digit unique ID to view accommodation details
+                  {phoneConnected ? (
+                    <>
+                      <span style={{ fontSize: '20px' }}>●</span>
+                      <span>Phone Connected - Ready to scan</span>
+                    </>
+                  ) : sessionDisconnected ? (
+                    <>
+                      <span style={{ fontSize: '20px' }}>⚠️</span>
+                      <span>Phone Disconnected - Scan QR again</span>
+                    </>
+                  ) : (
+                    <>
+                      <span style={{ fontSize: '20px' }}>○</span>
+                      <span>Waiting for phone connection...</span>
+                    </>
+                  )}
                 </p>
+                {lastScanTime && phoneConnected && (
+                  <p style={{ 
+                    color: 'rgba(255,255,255,0.85)', 
+                    fontSize: '12px',
+                    margin: '8px 0 0',
+                    opacity: 0.95
+                  }}>
+                    Last scan: {lastScanTime.toLocaleTimeString()}
+                  </p>
+                )}
               </div>
+            </div>
 
+            {/* Right Side - Manual Entry */}
+            <div style={{
+              textAlign: 'center',
+              color: 'white',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center'
+            }}>
+              <h3 style={{ 
+                color: 'white', 
+                marginBottom: '40px',
+                fontSize: '28px',
+                fontWeight: '700'
+              }}>
+                🔑 Enter 4-digit ID
+              </h3>
+              
               <div style={{ 
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                gap: '12px',
-                marginBottom: '32px'
+                gap: '16px',
+                marginBottom: '40px'
               }}>
                 <span style={{
-                  fontSize: '36px',
+                  fontSize: '40px',
                   fontWeight: '700',
-                  color: 'var(--primary)',
+                  color: 'white',
                   fontFamily: "'Playfair Display', serif"
                 }}>
                   INF
@@ -438,342 +551,435 @@ export default function ProvideKit() {
                     style={{
                       width: '70px',
                       height: '70px',
-                      fontSize: '28px',
+                      fontSize: '32px',
                       textAlign: 'center',
-                      borderRadius: '16px',
-                      border: '2px solid var(--border)',
-                      background: 'var(--surface)',
-                      color: 'var(--text-primary)',
+                      borderRadius: '14px',
+                      border: '2px solid rgba(255, 255, 255, 0.6)',
+                      background: 'rgba(255, 255, 255, 0.25)',
+                      color: 'white',
                       fontWeight: '700',
-                      transition: 'all 0.2s'
+                      transition: 'all 0.3s',
+                      backdropFilter: 'blur(10px)',
+                      cursor: 'text'
                     }}
                   />
                 ))}
               </div>
 
               {loading && (
-                <div className="loading">
-                  <div className="spinner"></div>
-                  <p>Loading participant details...</p>
+                <div style={{
+                  padding: '20px',
+                  background: 'rgba(255, 255, 255, 0.2)',
+                  borderRadius: '12px',
+                  color: 'white',
+                  fontSize: '16px',
+                  fontWeight: '600',
+                  backdropFilter: 'blur(10px)'
+                }}>
+                  🔍 Searching participant...
                 </div>
               )}
             </div>
-          </section>
-        )}
+          </div>
+          )}
 
-        {/* Scanner Mode Input */}
-        {scannerMode && (
-          <section style={{ marginBottom: '32px' }}>
-            {/* Side by side layout - QR on left, Manual on right */}
-            <div style={{ 
-              display: 'grid',
-              gridTemplateColumns: '1fr 1fr',
-              gap: '32px',
-              maxWidth: '1200px',
-              margin: '0 auto'
+
+          {/* Participant Details - Full Width */}
+          {participantData && (
+            <section style={{
+              marginTop: '40px',
+              animation: 'slideUp 0.3s ease-in-out'
             }}>
-              {/* Left Side - Connection QR Code */}
+              {/* Success Message */}
               <div style={{
-                background: 'var(--surface)',
-                border: '2px solid var(--border)',
+                background: 'linear-gradient(135deg, #10B981 0%, #059669 100%)',
+                color: 'white',
+                padding: '20px 28px',
+                borderRadius: '16px',
+                marginBottom: '24px',
+                textAlign: 'center',
+                fontWeight: '600',
+                fontSize: '16px',
+                boxShadow: '0 4px 15px rgba(16, 185, 129, 0.3)'
+              }}>
+                ✅ Participant Found Successfully!
+              </div>
+
+              {/* Details Card */}
+              <div style={{
+                background: 'linear-gradient(135deg, #FFFFFF 0%, #F8F9FF 100%)',
                 borderRadius: '20px',
                 padding: '40px',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center'
+                boxShadow: '0 15px 50px rgba(102, 126, 234, 0.15)',
+                marginBottom: '24px',
+                border: '1px solid rgba(102, 126, 234, 0.1)'
               }}>
-                {loading ? (
-                  <div className="loading">
-                    <div className="spinner"></div>
-                    <p>Generating QR code...</p>
-                  </div>
-                ) : scannerUrl ? (
-                  <>
-                    <div style={{
-                      background: 'white',
-                      padding: '20px',
-                      borderRadius: '16px',
-                      marginBottom: '24px',
-                      boxShadow: '0 8px 24px rgba(0,0,0,0.2)'
-                    }}>
-                      <QRCodeSVG 
-                        value={scannerUrl}
-                        size={200}
-                        level="H"
-                        bgColor="#ffffff"
-                        fgColor="#000000"
-                      />
-                    </div>
-                    <p style={{ 
-                      color: 'var(--text-secondary)', 
-                      fontSize: '14px',
-                      textAlign: 'center',
-                      marginBottom: '12px'
-                    }}>
-                      Scan this QR with your phone
-                    </p>
-                    <div style={{
-                      background: phoneConnected 
-                        ? 'rgba(16, 185, 129, 0.1)' 
-                        : sessionDisconnected 
-                          ? 'rgba(239, 68, 68, 0.1)'
-                          : 'rgba(124, 58, 237, 0.1)',
-                      padding: '12px 20px',
-                      borderRadius: '8px',
-                      border: phoneConnected 
-                        ? '1px solid rgba(16, 185, 129, 0.3)' 
-                        : sessionDisconnected
-                          ? '1px solid rgba(239, 68, 68, 0.3)'
-                          : '1px solid rgba(124, 58, 237, 0.3)',
-                      textAlign: 'center'
-                    }}>
-                      <p style={{ 
-                        color: phoneConnected 
-                          ? 'var(--success)' 
-                          : sessionDisconnected
-                            ? 'var(--danger)'
-                            : 'var(--secondary)', 
-                        fontSize: '13px',
-                        margin: 0,
-                        fontWeight: '600',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '8px'
-                      }}>
-                        {phoneConnected ? (
-                          <>
-                            <span style={{ fontSize: '18px' }}>●</span>
-                            <span>📱 Phone Connected - Ready to scan</span>
-                          </>
-                        ) : sessionDisconnected ? (
-                          <>
-                            <span style={{ fontSize: '18px' }}>⚠️</span>
-                            <span>Phone Disconnected - Scan QR again</span>
-                          </>
-                        ) : (
-                          <>
-                            <span style={{ fontSize: '18px' }}>○</span>
-                            <span>Waiting for phone connection...</span>
-                          </>
-                        )}
-                      </p>
-                      {lastScanTime && phoneConnected && (
-                        <p style={{ 
-                          color: 'var(--text-secondary)', 
-                          fontSize: '11px',
-                          margin: '4px 0 0',
-                          opacity: 0.7
-                        }}>
-                          Last scan: {lastScanTime.toLocaleTimeString()}
-                        </p>
-                      )}
-                    </div>
-                  </>
-                ) : (
+                {/* Header with ID */}
+                <div style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '20px',
+                  marginBottom: '32px',
+                  paddingBottom: '32px',
+                  borderBottom: '2px solid #E5E7EB'
+                }}>
                   <div style={{
-                    textAlign: 'center',
-                    color: 'var(--text-secondary)'
+                    width: '70px',
+                    height: '70px',
+                    background: 'linear-gradient(135deg, #667EEA 0%, #764BA2 100%)',
+                    borderRadius: '50%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: 'white',
+                    fontSize: '28px',
+                    fontWeight: 'bold',
+                    boxShadow: '0 4px 15px rgba(102, 126, 234, 0.3)'
                   }}>
-                    <p>Failed to generate QR code</p>
-                    <button 
-                      className="btn btn-primary"
-                      onClick={createScanSession}
-                      style={{ marginTop: '12px' }}
-                    >
-                      Retry
-                    </button>
+                    {participantData.name?.charAt(0)?.toUpperCase()}
+                  </div>
+                  <div>
+                    <h3 style={{
+                      fontSize: '24px',
+                      fontWeight: '700',
+                      color: '#1F2937',
+                      margin: 0
+                    }}>
+                      {participantData.name}
+                    </h3>
+                    <p style={{
+                      background: 'linear-gradient(135deg, #667EEA 0%, #764BA2 100%)',
+                      backgroundClip: 'text',
+                      WebkitBackgroundClip: 'text',
+                      WebkitTextFillColor: 'transparent',
+                      fontWeight: '600',
+                      margin: '6px 0 0 0',
+                      fontSize: '14px'
+                    }}>
+                      ID: {participantData.participant_id}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Details Grid */}
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr',
+                  gap: '24px',
+                  marginBottom: '28px'
+                }}>
+                  {/* Left Column */}
+                  <div>
+                    <div style={{ marginBottom: '20px' }}>
+                      <label style={{
+                        display: 'block',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        color: '#9CA3AF',
+                        marginBottom: '8px',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.8px'
+                      }}>
+                        College
+                      </label>
+                      <p style={{
+                        fontSize: '16px',
+                        fontWeight: '600',
+                        color: '#1F2937',
+                        margin: 0
+                      }}>
+                        {participantData.college}
+                      </p>
+                    </div>
+
+                    <div>
+                      <label style={{
+                        display: 'block',
+                        fontSize: '12px',
+                        fontWeight: '600',
+                        color: '#6B7280',
+                        marginBottom: '6px',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px'
+                      }}>
+                        Department
+                      </label>
+                      <p style={{
+                        fontSize: '16px',
+                        fontWeight: '600',
+                        color: '#1F2937',
+                        margin: 0
+                      }}>
+                        {participantData.department || 'N/A'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Right Column */}
+                  <div>
+                    <div style={{ marginBottom: '16px' }}>
+                      <label style={{
+                        display: 'block',
+                        fontSize: '12px',
+                        fontWeight: '600',
+                        color: '#6B7280',
+                        marginBottom: '6px',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px'
+                      }}>
+                        Year
+                      </label>
+                      <p style={{
+                        fontSize: '16px',
+                        fontWeight: '600',
+                        color: '#1F2937',
+                        margin: 0
+                      }}>
+                        {participantData.year || 'N/A'}
+                      </p>
+                    </div>
+
+                    <div>
+                      <label style={{
+                        display: 'block',
+                        fontSize: '12px',
+                        fontWeight: '600',
+                        color: '#6B7280',
+                        marginBottom: '6px',
+                        textTransform: 'uppercase',
+                        letterSpacing: '0.5px'
+                      }}>
+                        Email
+                      </label>
+                      <p style={{
+                        fontSize: '16px',
+                        fontWeight: '600',
+                        color: '#1F2937',
+                        margin: 0,
+                        wordBreak: 'break-all'
+                      }}>
+                        {participantData.email || 'N/A'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Status Badges */}
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr',
+                  gap: '20px',
+                  marginBottom: '28px',
+                  paddingBottom: '28px',
+                  borderBottom: '2px solid #E5E7EB'
+                }}>
+                  {/* Payment Status */}
+                  <div style={{
+                    padding: '20px',
+                    borderRadius: '16px',
+                    background: participantData.payment_status 
+                      ? 'linear-gradient(135deg, #ECFDF5 0%, #D1FAE5 100%)'
+                      : 'linear-gradient(135deg, #FEF2F2 0%, #FEE2E2 100%)',
+                    border: `2px solid ${participantData.payment_status ? '#10B981' : '#F87171'}`,
+                    boxShadow: `0 4px 12px ${participantData.payment_status ? 'rgba(16, 185, 129, 0.1)' : 'rgba(248, 113, 113, 0.1)'}`
+                  }}>
+                    <p style={{
+                      fontSize: '12px',
+                      fontWeight: '700',
+                      color: '#6B7280',
+                      margin: '0 0 10px 0',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.5px'
+                    }}>
+                      Payment Status
+                    </p>
+                    <p style={{
+                      fontSize: '18px',
+                      fontWeight: '700',
+                      margin: 0,
+                      color: participantData.payment_status ? '#10B981' : '#F87171'
+                    }}>
+                      {participantData.payment_status ? '✓ Paid' : '✗ Not Paid'}
+                    </p>
+                  </div>
+
+                  {/* Kit Status */}
+                  <div style={{
+                    padding: '20px',
+                    borderRadius: '16px',
+                    background: participantData.kit_provided 
+                      ? 'linear-gradient(135deg, #ECFDF5 0%, #D1FAE5 100%)'
+                      : 'linear-gradient(135deg, #FEF3C7 0%, #FCD34D 100%)',
+                    border: `2px solid ${participantData.kit_provided ? '#10B981' : '#FBBF24'}`,
+                    boxShadow: `0 4px 12px ${participantData.kit_provided ? 'rgba(16, 185, 129, 0.1)' : 'rgba(251, 191, 36, 0.1)'}`
+                  }}>
+                    <p style={{
+                      fontSize: '12px',
+                      fontWeight: '700',
+                      color: '#6B7280',
+                      margin: '0 0 10px 0',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.5px'
+                    }}>
+                      Kit Status
+                    </p>
+                    <p style={{
+                      fontSize: '18px',
+                      fontWeight: '700',
+                      margin: 0,
+                      color: participantData.kit_provided ? '#10B981' : '#F59E0B'
+                    }}>
+                      {participantData.kit_provided ? '✓ Provided' : '⏳ Not Provided'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Kit Type */}
+                <div style={{
+                  padding: '20px',
+                  borderRadius: '16px',
+                  background: 'linear-gradient(135deg, #F0F4FF 0%, #E0E7FF 100%)',
+                  border: '2px solid #667EEA',
+                  marginBottom: '28px',
+                  boxShadow: '0 4px 12px rgba(102, 126, 234, 0.1)'
+                }}>
+                  <p style={{
+                    fontSize: '12px',
+                    fontWeight: '700',
+                    color: '#6B7280',
+                    margin: '0 0 10px 0',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.5px'
+                  }}>
+                    Kit Type
+                  </p>
+                  <p style={{
+                    fontSize: '18px',
+                    fontWeight: '700',
+                    margin: 0,
+                    color: '#667EEA'
+                  }}>
+                    {participantData.kit_type}
+                  </p>
+                </div>
+
+                {/* Warnings */}
+                {participantData.kit_provided && (
+                  <div style={{
+                    background: 'linear-gradient(135deg, #FFFBEB 0%, #FEF3C7 100%)',
+                    border: '2px solid #FBBF24',
+                    borderRadius: '16px',
+                    padding: '16px',
+                    marginBottom: '24px',
+                    color: '#92400E',
+                    fontWeight: '600',
+                    boxShadow: '0 4px 12px rgba(251, 191, 36, 0.1)'
+                  }}>
+                    ⚠️ Kit already provided to this participant
+                  </div>
+                )}
+
+                {!participantData.payment_status && (
+                  <div style={{
+                    background: 'linear-gradient(135deg, #FEF2F2 0%, #FEE2E2 100%)',
+                    border: '2px solid #F87171',
+                    borderRadius: '16px',
+                    padding: '16px',
+                    marginBottom: '24px',
+                    color: '#991B1B',
+                    fontWeight: '600',
+                    boxShadow: '0 4px 12px rgba(248, 113, 113, 0.1)'
+                  }}>
+                    ❌ Payment not completed. Cannot provide kit.
                   </div>
                 )}
               </div>
 
-              {/* Right Side - Manual Entry */}
+              {/* Action Buttons */}
               <div style={{
-                  background: 'var(--surface)',
-                  border: '2px solid var(--border)',
-                  borderRadius: '20px',
-                  padding: '40px'
-                }}>
-                  <h3 style={{ 
-                    color: 'var(--text-primary)', 
-                    marginBottom: '24px',
-                    fontSize: '20px',
-                    textAlign: 'center'
-                  }}>
-                    Enter 4-digit Unique ID
-                  </h3>
-                  
-                  <div style={{ 
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: '12px',
-                    marginBottom: '32px'
-                  }}>
-                    <span style={{
-                      fontSize: '32px',
-                      fontWeight: '700',
-                      color: 'var(--primary)',
-                      fontFamily: "'Playfair Display', serif"
-                    }}>
-                      INF
-                    </span>
-                    {otpDigits.map((digit, index) => (
-                      <input
-                        key={index}
-                        ref={el => { inputRefs.current[index] = el; }}
-                        type="text"
-                        className="otp-input"
-                        maxLength={1}
-                        value={digit}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => handleOtpChange(index, e.target.value)}
-                        onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => handleKeyDown(index, e)}
-                        autoFocus={index === 0}
-                        style={{
-                          width: '60px',
-                          height: '60px',
-                          fontSize: '24px',
-                          textAlign: 'center',
-                          borderRadius: '12px',
-                          border: '2px solid var(--border)',
-                          background: 'var(--surface-light)',
-                          color: 'var(--text-primary)',
-                          fontWeight: '600'
-                        }}
-                      />
-                    ))}
-                  </div>
-
-                  <div style={{ 
-                    padding: '16px',
-                    background: 'rgba(233, 30, 140, 0.1)',
-                    borderRadius: '12px',
-                    border: '1px solid rgba(233, 30, 140, 0.3)',
-                    textAlign: 'center'
-                  }}>
-                    <p style={{ 
-                      color: 'var(--text-secondary)', 
-                      fontSize: '14px',
-                      margin: 0
-                    }}>
-                      Or use hardware barcode scanner below
-                    </p>
-                    <input
-                      ref={scannerInputRef}
-                      type="text"
-                      className="form-input"
-                      placeholder="Click here and scan"
-                      value={scannedCode}
-                      onChange={handleScannerInput}
-                      style={{ 
-                        width: '100%',
-                        marginTop: '12px',
-                        fontSize: '16px',
-                        textAlign: 'center',
-                        border: '2px solid var(--primary)',
-                        padding: '12px',
-                        background: 'var(--surface-light)',
-                        color: 'var(--text-primary)'
-                      }}
-                    />
-                  </div>
-                </div>
-              </div>
-            </section>
-          )}
-
-        {/* Participant Details */}
-        {participantData && (
-          <>
-            <hr className="section-divider" />
-            <section>
-              <h2 className="section-title">Participant Details</h2>
-              
-              {participantData.kit_provided && (
-                <div className="alert alert-warning">
-                  ⚠️ Kit already provided to this participant!
-                </div>
-              )}
-
-              {!participantData.payment_status && (
-                <div className="alert alert-error">
-                  ❌ Payment not completed. Cannot provide kit.
-                </div>
-              )}
-
-              <div className="participant-details">
-                <div className="detail-row">
-                  <span className="detail-label">Full Name:</span>
-                  <span className="detail-value">{participantData.name}</span>
-                </div>
-
-                <div className="detail-row">
-                  <span className="detail-label">Participant ID:</span>
-                  <span className="detail-value">{participantData.participant_id}</span>
-                </div>
-
-                <div className="detail-row">
-                  <span className="detail-label">College:</span>
-                  <span className="detail-value">{participantData.college}</span>
-                </div>
-
-                <div className="detail-row">
-                  <span className="detail-label">Payment Status:</span>
-                  <span className={participantData.payment_status ? 'status-paid' : 'status-unpaid'}>
-                    {participantData.payment_status ? 'Paid ✓' : 'Not Paid ✗'}
-                  </span>
-                </div>
-
-                <div className="detail-row">
-                  <span className="detail-label">Kit Type:</span>
-                  <span className="detail-value">{participantData.kit_type || 'General'}</span>
-                </div>
-
-                <div className="detail-row">
-                  <span className="detail-label">Kit Status:</span>
-                  <span className={participantData.kit_provided ? 'status-paid' : 'status-unpaid'}>
-                    {participantData.kit_provided ? 'Already Provided ✓' : 'Not Provided'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="btn-group">
-                <button 
-                  className="btn btn-primary" 
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '20px'
+              }}>
+                <button
                   onClick={handleProvideKit}
                   disabled={!canProvideKit || loading}
+                  style={{
+                    padding: '16px 32px',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    borderRadius: '16px',
+                    border: 'none',
+                    background: canProvideKit ? 'linear-gradient(135deg, #667EEA 0%, #764BA2 100%)' : '#D1D5DB',
+                    color: 'white',
+                    cursor: canProvideKit ? 'pointer' : 'not-allowed',
+                    transition: 'all 0.3s',
+                    boxShadow: canProvideKit ? '0 8px 20px rgba(102, 126, 234, 0.4)' : 'none'
+                  }}
                 >
-                  {loading ? 'Processing...' : 'Provide Kit'}
+                  {loading ? '⏳ Processing...' : '✓ Provide Kit'}
                 </button>
-                <button 
-                  className="btn btn-secondary" 
+                <button
                   onClick={handleReset}
+                  style={{
+                    padding: '16px 32px',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    borderRadius: '16px',
+                    border: '2px solid #E5E7EB',
+                    background: 'white',
+                    color: '#1F2937',
+                    cursor: 'pointer',
+                    transition: 'all 0.3s'
+                  }}
                 >
                   Reset
                 </button>
               </div>
             </section>
-          </>
-        )}
+          )}
+        </section>
 
-        {/* No Data Message */}
-        {!loading && !participantData && otpDigits.every(d => d !== '') && (
-          <div style={{ textAlign: 'center', padding: '40px', color: 'var(--text-gray)' }}>
-            <h3>No Data Available!</h3>
-            <p>Please check the ID and try again.</p>
-          </div>
-        )}
-
-        <div style={{ marginTop: '24px', textAlign: 'center' }}>
-          <button 
-            className="btn btn-secondary" 
+        <div style={{ marginTop: '40px', textAlign: 'center' }}>
+          <button
             onClick={() => router.push('/')}
-            style={{ maxWidth: '200px' }}
+            style={{
+              padding: '12px 32px',
+              fontSize: '14px',
+              fontWeight: '600',
+              borderRadius: '12px',
+              border: '2px solid #E5E7EB',
+              background: 'white',
+              color: '#1F2937',
+              cursor: 'pointer',
+              transition: 'all 0.3s'
+            }}
           >
-            Back to Dashboard
+            ← Back to Dashboard
           </button>
         </div>
+
+        <style>{`
+          @keyframes slideUp {
+            from {
+              opacity: 0;
+              transform: translateY(20px);
+            }
+            to {
+              opacity: 1;
+              transform: translateY(0);
+            }
+          }
+
+          @keyframes pulse {
+            0%, 100% {
+              opacity: 1;
+            }
+            50% {
+              opacity: 0.5;
+            }
+          }
+        `}</style>
       </div>
     </div>
   );

@@ -6,20 +6,21 @@ export async function GET(request: NextRequest) {
   try {
     await connectDB();
 
-    // Get all participants who have received their kits
-    const participants = await Participant.find({
-      kit_provided: true,
-    })
-      .select('participant_id name college kit_type kit_provided_at')
-      .sort({ kit_provided_at: -1 }) // Most recent first
-      .limit(200); // Limit to last 200 for performance
+    // Get ALL registered participants with kit status
+    const participants = await Participant.find({})
+      .select('participant_id uniqueId name college department year kit_provided kit_provided_at kit_type')
+      .sort({ createdAt: -1 });
 
-    // Transform to frontend format
+    // Transform to frontend format with all required fields
     const participantList = participants.map((p) => ({
-      participant_id: p.participant_id,
+      made_id: p.participant_id,  // mapped to participant_id
+      unique_id: p.uniqueId,
       name: p.name,
       college: p.college,
+      department: p.department,
+      year: p.year,
       kit_type: p.kit_type,
+      kit_provided: p.kit_provided,
       provided_at: p.kit_provided_at?.toISOString() || null,
     }));
 
@@ -27,6 +28,11 @@ export async function GET(request: NextRequest) {
       success: true,
       participants: participantList,
       total: participantList.length,
+      summary: {
+        total_registered: participantList.length,
+        kits_provided: participantList.filter(p => p.kit_provided).length,
+        kits_pending: participantList.filter(p => !p.kit_provided).length,
+      }
     });
 
   } catch (error) {

@@ -19,18 +19,22 @@ export async function POST(request: NextRequest) {
     // Generate unique participant ID
     const timestamp = Date.now();
     const randomNum = Math.floor(1000 + Math.random() * 9000);
-    const participantId = `INFIN${randomNum}`;
+    const participantId = `INF${randomNum}`;
+    
+    // Generate unique ID (for QR codes)
+    const uniqueId = `UID${Date.now()}${Math.floor(Math.random() * 1000)}`.toUpperCase();
 
     // Check if ID already exists (rare collision)
     const exists = await Participant.findOne({ participant_id: participantId });
     if (exists) {
       // Retry with new random number
       const newRandomNum = Math.floor(1000 + Math.random() * 9000);
-      const newParticipantId = `INFIN${newRandomNum}`;
+      const newParticipantId = `INF${newRandomNum}`;
       
       // Create participant
       const participant = await Participant.create({
         participant_id: newParticipantId,
+        uniqueId: uniqueId,
         name: data.name,
         email: data.email.toLowerCase(),
         college: data.college,
@@ -41,7 +45,7 @@ export async function POST(request: NextRequest) {
         payment_status: false, // Needs to pay
         kit_type: data.kit_type || 'General Only',
         kit_provided: false,
-        registered_via: 'onspot',
+        registered_via: 'form',
       });
 
       return NextResponse.json({
@@ -57,6 +61,7 @@ export async function POST(request: NextRequest) {
     // Create participant
     const participant = await Participant.create({
       participant_id: participantId,
+      uniqueId: uniqueId,
       name: data.name,
       email: data.email.toLowerCase(),
       college: data.college,
@@ -67,7 +72,7 @@ export async function POST(request: NextRequest) {
       payment_status: false, // Needs to pay
       kit_type: data.kit_type || 'General Only',
       kit_provided: false,
-      registered_via: 'onspot',
+      registered_via: 'form',
     });
 
     return NextResponse.json({

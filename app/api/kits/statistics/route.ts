@@ -22,6 +22,19 @@ export async function GET(request: NextRequest) {
       kit_type: 'General Only',
     });
 
+    // Count registered by type
+    const registeredWorkshopAndGeneral = await Participant.countDocuments({
+      kit_type: 'Workshop + General',
+    });
+
+    const registeredWorkshopOnly = await Participant.countDocuments({
+      kit_type: 'Workshop Only',
+    });
+
+    const registeredGeneralOnly = await Participant.countDocuments({
+      kit_type: 'General Only',
+    });
+
     // Also get totals for reference
     const totalRegistered = await Participant.countDocuments();
     const totalKitsProvided = await Participant.countDocuments({
@@ -29,11 +42,27 @@ export async function GET(request: NextRequest) {
     });
 
     return NextResponse.json({
-      workshop_and_general: workshopAndGeneral,
-      workshop_only: workshopOnly,
-      general_only: generalOnly,
-      total_registered: totalRegistered,
-      total_kits_provided: totalKitsProvided,
+      success: true,
+      data: {
+        kits_provided: {
+          workshop_and_general: workshopAndGeneral,
+          workshop_only: workshopOnly,
+          general_only: generalOnly,
+          total: totalKitsProvided,
+        },
+        registered: {
+          workshop_and_general: registeredWorkshopAndGeneral,
+          workshop_only: registeredWorkshopOnly,
+          general_only: registeredGeneralOnly,
+          total: totalRegistered,
+        },
+        summary: {
+          total_registered: totalRegistered,
+          total_kits_provided: totalKitsProvided,
+          pending_kits: totalRegistered - totalKitsProvided,
+          percentage_provided: totalRegistered > 0 ? ((totalKitsProvided / totalRegistered) * 100).toFixed(2) : 0,
+        }
+      }
     });
 
   } catch (error) {

@@ -2,6 +2,7 @@ import mongoose, { Schema, Model } from 'mongoose';
 
 export interface IParticipant {
   participant_id: string;
+  uniqueId: string;
   name: string;
   email: string;
   college: string;
@@ -9,11 +10,11 @@ export interface IParticipant {
   year: number;
   phone: string;
   accommodation: string;
-  payment_status: boolean;
-  kit_type: string;
-  kit_provided: boolean;
+  payment_status?: boolean;
+  kit_type?: string;
+  kit_provided?: boolean;
   kit_provided_at?: Date;
-  registered_via: 'form' | 'onspot';
+  registered_via?: 'form';
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -21,6 +22,14 @@ export interface IParticipant {
 const ParticipantSchema = new Schema<IParticipant>(
   {
     participant_id: {
+      type: String,
+      required: true,
+      unique: true,
+      uppercase: true,
+      trim: true,
+      index: true,
+    },
+    uniqueId: {
       type: String,
       required: true,
       unique: true,
@@ -89,8 +98,8 @@ const ParticipantSchema = new Schema<IParticipant>(
     registered_via: {
       type: String,
       required: true,
-      enum: ['form', 'onspot'],
-      default: 'onspot',
+      enum: ['form'],
+      default: 'form',
     },
   },
   {

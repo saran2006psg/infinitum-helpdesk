@@ -12,7 +12,7 @@ import type {
   ParticipantListResponse,
 } from '../types';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://10.155.34.158:3001';
 
 /**
  * Generic API request handler

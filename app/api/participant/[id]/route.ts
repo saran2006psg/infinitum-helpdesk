@@ -10,14 +10,22 @@ export async function GET(
     // Connect to database
     await connectDB();
 
-    const participantId = params.id.toUpperCase();
+    const participantId = params.id.toUpperCase().trim();
 
-    // Find participant by ID
-    const participant = await Participant.findOne({ 
-      participant_id: participantId 
-    }).select('-_id -__v'); // Exclude MongoDB internal fields
+    console.log('Searching for participant:', participantId);
+
+    // Find participant by participant_id OR uniqueId
+    let participant = await Participant.findOne({ 
+      $or: [
+        { participant_id: participantId },
+        { uniqueId: participantId }
+      ]
+    });
+
+    console.log('Search result:', participant);
 
     if (!participant) {
+      console.error('Participant not found:', participantId);
       return NextResponse.json(
         { message: 'Participant not found', success: false },
         { status: 404 }
@@ -26,12 +34,20 @@ export async function GET(
 
     // Return participant details
     return NextResponse.json({
-      participant_id: participant.participant_id,
-      name: participant.name,
-      college: participant.college,
-      payment_status: participant.payment_status,
-      kit_type: participant.kit_type,
-      kit_provided: participant.kit_provided,
+      success: true,
+      participant: {
+        participant_id: participant.participant_id,
+        uniqueId: participant.uniqueId,
+        name: participant.name,
+        email: participant.email,
+        phone: participant.phone,
+        college: participant.college,
+        department: participant.department,
+        year: participant.year,
+        payment_status: participant.payment_status,
+        kit_type: participant.kit_type,
+        kit_provided: participant.kit_provided,
+      }
     });
 
   } catch (error) {
